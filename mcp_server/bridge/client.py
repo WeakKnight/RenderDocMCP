@@ -1,13 +1,21 @@
 """
 RenderDoc Bridge Client
-Communicates with the RenderDoc extension's socket server.
+Communicates with the RenderDoc extension via file-based IPC.
 """
 
 import json
-import socket
-import struct
+import os
+import tempfile
+import time
 import uuid
 from typing import Any
+
+
+# IPC directory (must match renderdoc_extension/socket_server.py)
+IPC_DIR = os.path.join(tempfile.gettempdir(), "renderdoc_mcp")
+REQUEST_FILE = os.path.join(IPC_DIR, "request.json")
+RESPONSE_FILE = os.path.join(IPC_DIR, "response.json")
+LOCK_FILE = os.path.join(IPC_DIR, "lock")
 
 
 class RenderDocBridgeError(Exception):
@@ -17,40 +25,22 @@ class RenderDocBridgeError(Exception):
 
 
 class RenderDocBridge:
-    """Client for communicating with RenderDoc extension"""
+    """Client for communicating with RenderDoc extension via file-based IPC"""
 
     def __init__(self, host: str = "127.0.0.1", port: int = 19876):
+        # host/port are kept for API compatibility but not used
         self.host = host
         self.port = port
-        self._socket: socket.socket | None = None
-
-    def _ensure_connected(self) -> None:
-        """Ensure connection to RenderDoc extension"""
-        if self._socket is None:
-            try:
-                self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self._socket.connect((self.host, self.port))
-                self._socket.settimeout(30.0)
-            except ConnectionRefusedError:
-                raise RenderDocBridgeError(
-                    f"Cannot connect to RenderDoc MCP Bridge at {self.host}:{self.port}. "
-                    "Make sure RenderDoc is running with the MCP Bridge extension loaded."
-                )
-            except Exception as e:
-                raise RenderDocBridgeError(f"Connection failed: {e}")
-
-    def _disconnect(self) -> None:
-        """Disconnect from RenderDoc extension"""
-        if self._socket:
-            try:
-                self._socket.close()
-            except Exception:
-                pass
-            self._socket = None
+        self.timeout = 30.0  # seconds
 
     def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
         """Call a method on the RenderDoc extension"""
-        self._ensure_connected()
+        # Check if IPC directory exists
+        if not os.path.exists(IPC_DIR):
+            raise RenderDocBridgeError(
+                f"Cannot connect to RenderDoc MCP Bridge at {self.host}:{self.port}. "
+                "Make sure RenderDoc is running with the MCP Bridge extension loaded."
+            )
 
         request = {
             "id": str(uuid.uuid4()),
@@ -59,41 +49,49 @@ class RenderDocBridge:
         }
 
         try:
-            # Send request
-            request_bytes = json.dumps(request).encode("utf-8")
-            assert self._socket is not None
-            self._socket.sendall(struct.pack(">I", len(request_bytes)))
-            self._socket.sendall(request_bytes)
+            # Clean up any stale response file
+            if os.path.exists(RESPONSE_FILE):
+                os.remove(RESPONSE_FILE)
 
-            # Receive response
-            length_bytes = self._recv_exact(4)
-            msg_length = struct.unpack(">I", length_bytes)[0]
-            response_bytes = self._recv_exact(msg_length)
+            # Create lock file to signal we're writing
+            with open(LOCK_FILE, "w") as f:
+                f.write("lock")
 
-            response = json.loads(response_bytes.decode("utf-8"))
+            # Write request
+            with open(REQUEST_FILE, "w", encoding="utf-8") as f:
+                json.dump(request, f)
 
-            if "error" in response:
-                error = response["error"]
-                raise RenderDocBridgeError(f"[{error['code']}] {error['message']}")
+            # Remove lock file to signal write complete
+            os.remove(LOCK_FILE)
 
-            return response.get("result")
+            # Wait for response
+            start_time = time.time()
+            while True:
+                if os.path.exists(RESPONSE_FILE):
+                    # Small delay to ensure file is fully written
+                    time.sleep(0.01)
+
+                    # Read response
+                    with open(RESPONSE_FILE, "r", encoding="utf-8") as f:
+                        response = json.load(f)
+
+                    # Clean up response file
+                    os.remove(RESPONSE_FILE)
+
+                    if "error" in response:
+                        error = response["error"]
+                        raise RenderDocBridgeError(f"[{error['code']}] {error['message']}")
+
+                    return response.get("result")
+
+                # Check timeout
+                if time.time() - start_time > self.timeout:
+                    raise RenderDocBridgeError("Request timed out")
+
+                # Poll interval
+                time.sleep(0.05)
 
         except RenderDocBridgeError:
             raise
-        except socket.timeout:
-            self._disconnect()
-            raise RenderDocBridgeError("Request timed out")
         except Exception as e:
-            self._disconnect()
             raise RenderDocBridgeError(f"Communication error: {e}")
-
-    def _recv_exact(self, n: int) -> bytes:
-        """Receive exactly n bytes"""
-        assert self._socket is not None
-        data = b""
-        while len(data) < n:
-            chunk = self._socket.recv(n - len(data))
-            if not chunk:
-                raise RenderDocBridgeError("Connection closed by server")
-            data += chunk
-        return data
