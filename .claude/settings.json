@@ -1,7 +1,8 @@
 {
     "permissions": {
         "allow": [
-            "Bash(python scripts/install_extension.py)"
+            "Bash(python scripts/install_extension.py)",
+            "mcp__renderdoc"
         ]
     }
 }

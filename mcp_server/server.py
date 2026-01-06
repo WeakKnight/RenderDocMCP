@@ -144,7 +144,14 @@ def get_pipeline_state(event_id: int) -> dict:
     Args:
         event_id: The event ID to get pipeline state at
 
-    Includes bound shaders, render targets, viewports, and other state.
+    Returns detailed pipeline state including:
+    - Bound shaders with entry points for each stage
+    - Shader resources (SRVs): textures and buffers with dimensions, format, slot, name
+    - UAVs (RWTextures/RWBuffers): resource details with dimensions and format
+    - Samplers: addressing modes, filter settings, LOD parameters
+    - Constant buffers: slot, size, variable count
+    - Render targets and depth target
+    - Viewports and input assembly state
     """
     return bridge.call("get_pipeline_state", {"event_id": event_id})
 

@@ -404,7 +404,7 @@ class RenderDocFacade:
                 "api": str(api),
             }
 
-            # Shader stages
+            # Shader stages with detailed bindings
             stages = {}
             stage_list = [
                 rd.ShaderStage.Vertex,
@@ -417,10 +417,36 @@ class RenderDocFacade:
             for stage in stage_list:
                 shader = pipe.GetShader(stage)
                 if shader != rd.ResourceId.Null():
-                    stages[str(stage)] = {
+                    stage_info = {
                         "resource_id": str(shader),
                         "entry_point": pipe.GetShaderEntryPoint(stage),
                     }
+
+                    # Get reflection for resource names
+                    reflection = pipe.GetShaderReflection(stage)
+
+                    # Get shader resources (SRVs - textures/buffers)
+                    stage_info["resources"] = self._get_stage_resources(
+                        controller, pipe, stage, reflection
+                    )
+
+                    # Get UAVs (RWTextures/RWBuffers)
+                    stage_info["uavs"] = self._get_stage_uavs(
+                        controller, pipe, stage, reflection
+                    )
+
+                    # Get samplers
+                    stage_info["samplers"] = self._get_stage_samplers(
+                        pipe, stage, reflection
+                    )
+
+                    # Get constant buffers
+                    stage_info["constant_buffers"] = self._get_stage_cbuffers(
+                        controller, pipe, stage, reflection
+                    )
+
+                    stages[str(stage)] = stage_info
+
             pipeline_info["shaders"] = stages
 
             # Viewport and scissor
@@ -473,6 +499,220 @@ class RenderDocFacade:
         if result["error"]:
             raise ValueError(result["error"])
         return result["pipeline"]
+
+    def _get_stage_resources(self, controller, pipe, stage, reflection):
+        """Get shader resource views (SRVs) for a stage"""
+        resources = []
+        try:
+            # Get bound SRVs - returns list of UsedDescriptor
+            srvs = pipe.GetReadOnlyResources(stage, False)
+
+            # Build name map from reflection
+            name_map = {}
+            if reflection:
+                for res in reflection.readOnlyResources:
+                    name_map[res.fixedBindNumber] = res.name
+
+            for srv in srvs:
+                if srv.descriptor.resource == rd.ResourceId.Null():
+                    continue
+
+                slot = srv.access.index
+                res_info = {
+                    "slot": slot,
+                    "name": name_map.get(slot, ""),
+                    "resource_id": str(srv.descriptor.resource),
+                }
+
+                # Get resource details (texture or buffer)
+                res_info.update(
+                    self._get_resource_details(controller, srv.descriptor.resource)
+                )
+
+                # View information
+                res_info["first_mip"] = srv.descriptor.firstMip
+                res_info["num_mips"] = srv.descriptor.numMips
+                res_info["first_slice"] = srv.descriptor.firstSlice
+                res_info["num_slices"] = srv.descriptor.numSlices
+
+                resources.append(res_info)
+        except Exception as e:
+            resources.append({"error": str(e)})
+
+        return resources
+
+    def _get_stage_uavs(self, controller, pipe, stage, reflection):
+        """Get unordered access views (UAVs) for a stage"""
+        uavs = []
+        try:
+            # Get bound UAVs - returns list of UsedDescriptor
+            uav_list = pipe.GetReadWriteResources(stage, False)
+
+            # Build name map from reflection
+            name_map = {}
+            if reflection:
+                for res in reflection.readWriteResources:
+                    name_map[res.fixedBindNumber] = res.name
+
+            for uav in uav_list:
+                if uav.descriptor.resource == rd.ResourceId.Null():
+                    continue
+
+                slot = uav.access.index
+                uav_info = {
+                    "slot": slot,
+                    "name": name_map.get(slot, ""),
+                    "resource_id": str(uav.descriptor.resource),
+                }
+
+                # Get resource details
+                uav_info.update(
+                    self._get_resource_details(controller, uav.descriptor.resource)
+                )
+
+                # View information
+                uav_info["first_element"] = uav.descriptor.firstMip
+                uav_info["num_elements"] = uav.descriptor.numMips
+
+                uavs.append(uav_info)
+        except Exception as e:
+            uavs.append({"error": str(e)})
+
+        return uavs
+
+    def _get_stage_samplers(self, pipe, stage, reflection):
+        """Get samplers for a stage"""
+        samplers = []
+        try:
+            # Get bound samplers - returns list of UsedDescriptor
+            sampler_list = pipe.GetSamplers(stage, False)
+
+            # Build name map from reflection
+            name_map = {}
+            if reflection:
+                for samp in reflection.samplers:
+                    name_map[samp.fixedBindNumber] = samp.name
+
+            for samp in sampler_list:
+                slot = samp.access.index
+                samp_info = {
+                    "slot": slot,
+                    "name": name_map.get(slot, ""),
+                }
+
+                # Get sampler state from the descriptor
+                # The descriptor structure varies by API, try different attribute names
+                desc = samp.descriptor
+                try:
+                    # Try D3D11 style attributes
+                    samp_info["address_u"] = str(desc.addressU)
+                    samp_info["address_v"] = str(desc.addressV)
+                    samp_info["address_w"] = str(desc.addressW)
+                except AttributeError:
+                    pass
+
+                try:
+                    samp_info["filter"] = str(desc.filter)
+                except AttributeError:
+                    pass
+
+                try:
+                    samp_info["max_anisotropy"] = desc.maxAnisotropy
+                except AttributeError:
+                    pass
+
+                try:
+                    samp_info["min_lod"] = desc.minLOD
+                    samp_info["max_lod"] = desc.maxLOD
+                    samp_info["mip_lod_bias"] = desc.mipLODBias
+                except AttributeError:
+                    pass
+
+                try:
+                    samp_info["border_color"] = [
+                        desc.borderColor[0],
+                        desc.borderColor[1],
+                        desc.borderColor[2],
+                        desc.borderColor[3],
+                    ]
+                except (AttributeError, TypeError):
+                    pass
+
+                try:
+                    samp_info["compare_function"] = str(desc.compareFunction)
+                except AttributeError:
+                    pass
+
+                samplers.append(samp_info)
+        except Exception as e:
+            samplers.append({"error": str(e)})
+
+        return samplers
+
+    def _get_stage_cbuffers(self, controller, pipe, stage, reflection):
+        """Get constant buffers for a stage from shader reflection"""
+        cbuffers = []
+        try:
+            if not reflection:
+                return cbuffers
+
+            for cb in reflection.constantBlocks:
+                slot = cb.bindPoint if hasattr(cb, 'bindPoint') else cb.fixedBindNumber
+                cb_info = {
+                    "slot": slot,
+                    "name": cb.name,
+                    "byte_size": cb.byteSize,
+                    "variable_count": len(cb.variables) if cb.variables else 0,
+                    "variables": [],
+                }
+                if cb.variables:
+                    for var in cb.variables:
+                        cb_info["variables"].append({
+                            "name": var.name,
+                            "byte_offset": var.byteOffset,
+                            "type": str(var.type.name) if var.type else "",
+                        })
+                cbuffers.append(cb_info)
+
+        except Exception as e:
+            cbuffers.append({"error": str(e)})
+
+        return cbuffers
+
+    def _get_resource_details(self, controller, resource_id):
+        """Get details about a resource (texture or buffer)"""
+        details = {}
+
+        # Get resource name from RenderDoc context
+        try:
+            resource_name = self.ctx.GetResourceName(resource_id)
+            if resource_name:
+                details["resource_name"] = resource_name
+        except Exception:
+            pass
+
+        # Check if it's a texture
+        for tex in controller.GetTextures():
+            if tex.resourceId == resource_id:
+                details["type"] = "texture"
+                details["width"] = tex.width
+                details["height"] = tex.height
+                details["depth"] = tex.depth
+                details["array_size"] = tex.arraysize
+                details["mip_levels"] = tex.mips
+                details["format"] = str(tex.format.Name())
+                details["dimension"] = str(tex.type)
+                details["msaa_samples"] = tex.msSamp
+                return details
+
+        # Check if it's a buffer
+        for buf in controller.GetBuffers():
+            if buf.resourceId == resource_id:
+                details["type"] = "buffer"
+                details["length"] = buf.length
+                return details
+
+        return details
 
     # ==================== Helper Methods ====================
 
