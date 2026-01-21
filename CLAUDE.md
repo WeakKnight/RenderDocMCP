@@ -50,6 +50,7 @@ RenderDocMCP/
 | `find_draws_by_texture` | テクスチャ名でドローコールを逆引き検索 |
 | `find_draws_by_resource` | リソースIDでドローコールを逆引き検索 |
 | `get_draw_call_details` | 特定ドローコールの詳細 |
+| `get_action_timings` | アクションのGPU実行時間を取得 |
 | `get_shader_info` | シェーダーソース/定数バッファ |
 | `get_buffer_contents` | バッファデータ取得（オフセット/長さ指定可） |
 | `get_texture_info` | テクスチャメタデータ |
@@ -94,6 +95,23 @@ find_draws_by_texture(texture_name="CharacterSkin")
 # リソースIDで検索（完全一致）
 find_draws_by_resource(resource_id="ResourceId::12345")
 ```
+
+### GPU タイミング取得
+
+```python
+# 全アクションのタイミングを取得
+get_action_timings()
+# → {"available": true, "unit": "CounterUnit.Seconds", "timings": [...], "total_duration_ms": 12.5, "count": 150}
+
+# 特定のイベントIDのみ取得
+get_action_timings(event_ids=[100, 200, 300])
+
+# マーカーでフィルタリング
+get_action_timings(marker_filter="Camera.Render", exclude_markers=["GUI.Repaint"])
+```
+
+**注意**: GPUタイミングカウンターはハードウェア/ドライバーによっては利用できない場合があります。
+`available: false` が返された場合、そのキャプチャではタイミング情報を取得できません。
 
 ## 通信プロトコル
 

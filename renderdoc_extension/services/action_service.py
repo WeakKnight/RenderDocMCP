@@ -175,3 +175,141 @@ class ActionService:
         if result["error"]:
             raise ValueError(result["error"])
         return result["details"]
+
+    def get_action_timings(
+        self,
+        event_ids=None,
+        marker_filter=None,
+        exclude_markers=None,
+    ):
+        """
+        Get GPU timing information for actions.
+
+        Args:
+            event_ids: Optional list of specific event IDs to get timings for.
+                      If None, returns timings for all actions.
+            marker_filter: Only include actions under markers containing this string.
+            exclude_markers: Exclude actions under markers containing these strings.
+
+        Returns:
+            Dictionary with:
+            - available: Whether GPU timing counters are supported
+            - unit: Time unit (typically "seconds")
+            - timings: List of {event_id, name, duration_seconds, duration_ms}
+            - total_duration_ms: Sum of all durations
+        """
+        if not self.ctx.IsCaptureLoaded():
+            raise ValueError("No capture loaded")
+
+        result = {"data": None, "error": None}
+
+        def callback(controller):
+            # Check if EventGPUDuration counter is available
+            counters = controller.EnumerateCounters()
+            if rd.GPUCounter.EventGPUDuration not in counters:
+                result["data"] = {
+                    "available": False,
+                    "error": "GPU timing counters not supported on this capture",
+                }
+                return
+
+            # Get counter description
+            counter_desc = controller.DescribeCounter(rd.GPUCounter.EventGPUDuration)
+
+            # Fetch timing data
+            counter_results = controller.FetchCounters([rd.GPUCounter.EventGPUDuration])
+
+            # Build event_id to timing map
+            timing_map = {}
+            target_counter = int(rd.GPUCounter.EventGPUDuration)
+            for r in counter_results:
+                if r.counter == target_counter:
+                    # EventGPUDuration typically returns double
+                    # Try to get the value in the most appropriate way
+                    val = r.value.d  # double is the standard for duration
+                    timing_map[r.eventId] = val
+
+            # Get structured file for action names
+            structured_file = controller.GetStructuredFile()
+            root_actions = controller.GetRootActions()
+
+            # Collect actions to report timings for
+            timings = []
+            total_duration = [0.0]
+
+            def collect_timings(actions, parent_markers=None):
+                if parent_markers is None:
+                    parent_markers = []
+
+                for action in actions:
+                    action_name = action.GetName(structured_file)
+                    current_markers = parent_markers[:]
+
+                    # Track marker hierarchy
+                    is_marker = bool(action.flags & (rd.ActionFlags.PushMarker | rd.ActionFlags.SetMarker))
+                    if is_marker:
+                        current_markers.append(action_name)
+
+                    # Apply marker filter
+                    if marker_filter:
+                        marker_path = "/".join(current_markers)
+                        if marker_filter.lower() not in marker_path.lower():
+                            # Still recurse into children
+                            if action.children:
+                                collect_timings(action.children, current_markers)
+                            continue
+
+                    # Apply exclude filter
+                    if exclude_markers:
+                        skip = False
+                        for exclude in exclude_markers:
+                            for m in current_markers:
+                                if exclude.lower() in m.lower():
+                                    skip = True
+                                    break
+                            if skip:
+                                break
+                        if skip:
+                            if action.children:
+                                collect_timings(action.children, current_markers)
+                            continue
+
+                    # Check if we should include this event
+                    event_id = action.eventId
+                    include = True
+                    if event_ids is not None:
+                        include = event_id in event_ids
+
+                    if include and event_id in timing_map:
+                        duration_sec = timing_map[event_id]
+                        duration_ms = duration_sec * 1000.0
+                        timings.append({
+                            "event_id": event_id,
+                            "name": action_name,
+                            "duration_seconds": duration_sec,
+                            "duration_ms": duration_ms,
+                        })
+                        total_duration[0] += duration_ms
+
+                    # Recurse into children
+                    if action.children:
+                        collect_timings(action.children, current_markers)
+
+            collect_timings(root_actions)
+
+            # Sort by event_id
+            timings.sort(key=lambda x: x["event_id"])
+
+            result["data"] = {
+                "available": True,
+                "unit": str(counter_desc.unit),
+                "timings": timings,
+                "total_duration_ms": total_duration[0],
+                "count": len(timings),
+            }
+
+        self._invoke(callback)
+
+        if result["error"]:
+            raise ValueError(result["error"])
+        return result["data"]

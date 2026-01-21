@@ -90,6 +90,14 @@ class RenderDocFacade:
         """Get detailed information about a specific draw call"""
         return self._action.get_draw_call_details(event_id)
 
+    def get_action_timings(self, event_ids=None, marker_filter=None, exclude_markers=None):
+        """Get GPU timing information for actions"""
+        return self._action.get_action_timings(
+            event_ids=event_ids,
+            marker_filter=marker_filter,
+            exclude_markers=exclude_markers,
+        )
+
     # ==================== Search Operations ====================
 
     def find_draws_by_shader(self, shader_name, stage=None):
